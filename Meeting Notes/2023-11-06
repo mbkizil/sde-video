@@ -1,0 +1,11 @@
+# ONGOING:
+- Experiment for video as stochastic process: bm and fbm experiments
+    - The problem was related to cuda cudnn version mismatch. By IT, new versions are available in cluster
+    - Experiments are ongoing now but will be finished in a weeek.
+
+# TO DO:
+- diffusion process 
+    - Stable diffusion
+    - Invert in a dataset (pick a movement e.g. right arm up in tai-chi), invert only involves this movement
+    - Focus on reconstruction quality
+
