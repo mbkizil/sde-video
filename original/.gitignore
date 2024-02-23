@@ -1,0 +1,13 @@
+**/__temp__.mp4
+.ipynb_checkpoints/
+lightning_logs/
+__pycache__/
+.venv/
+wandb/
+*.ckpt
+.vscode/
+*.egg-info
+*.png
+*.pkl
+*.pdf
+*.p
