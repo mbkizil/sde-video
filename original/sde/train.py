@@ -128,7 +128,7 @@ def train(
         gamma_max: float = 20.,
         int_sub_steps: int = 3,
         kl_weight: float = 1.,
-        log_video_interval: int = 1000
+        log_video_interval: int = 100
     ):
     solver = diffrax.StratonovichMilstein()
 
@@ -201,7 +201,6 @@ def train(
     
 def log_gif(model, frames, params, key, ts, dt, solver, range, name):
     video, _ = model(params, key, ts, frames[0], dt, solver)
-    video = jnp.repeat(jnp.array(video), 3, axis=-1)
     filename = f"tmp/{str(uuid.uuid4())}.gif"
     with imageio.get_writer(filename, mode="I") as writer:
         for b_frame in video:
