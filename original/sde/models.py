@@ -451,10 +451,10 @@ class VideoSDE:
             kl_x0 = x0_posterior.kl_divergence(x0_prior)
 
             xs, logpath = self.sde(params, keys[1], x0, ts, dt, solver, {'context': context})
-            print("\nXS SHAPE: ", xs.shape, "\n")
-            print("\nCONTENT SHAPE: ", w.shape, "\n")
+#             print("\nXS SHAPE: ", xs.shape, "\n")
+#             print("\nCONTENT SHAPE: ", w.shape, "\n")
             combined = self.combine(params, w, xs)
-            print("\nCOMBINED SHAPE: ", combined.shape, "\n")
+#             print("\nCOMBINED SHAPE: ", combined.shape, "\n")
             frames_ = self.decoder(params, combined)
             return frames_, (kl_x0, logpath)
         else:

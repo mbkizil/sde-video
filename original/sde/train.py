@@ -14,6 +14,9 @@ import pickle
 import typing
 from jsonargparse import ArgumentParser
 import wandb
+import uuid
+import imageio
+import os
 
 
 class MLP(nn.Module):
@@ -125,6 +128,7 @@ def train(
         gamma_max: float = 20.,
         int_sub_steps: int = 3,
         kl_weight: float = 1.,
+        log_video_interval: int = 1000
     ):
     solver = diffrax.StratonovichMilstein()
 
@@ -143,11 +147,17 @@ def train(
         return loss.mean(), jax.tree_util.tree_map(jnp.mean, aux)
 
     loss_grad = jax.jit(jax.value_and_grad(batched_loss_fn, has_aux=True))
+    
+#     partition_optimizers = {'trainable': optax.adam(3e-4), 'frozen': optax.set_to_zero()}
+#     param_partitions = traverse_util.path_aware_map(lambda path, v: 'frozen' if 'taesd' in path else 'trainable', params)
+#     tx = optax.multi_transform(partition_optimizers, param_partitions)
+    
+#     print(param_partitions)
 
     optimizer = optax.adam(3e-4)
     opt_state = optimizer.init(params)
     random_key = jax.random.PRNGKey(7)
-    pri = True
+    pri = False
     seco = False
     for epoch in range(num_epochs):
         pbar = tqdm(range(len(dataloader)))
@@ -179,12 +189,29 @@ def train(
                 'kl_path': float(logpath),
                 'hurst': float(model._sde.hurst(params["sde"])),
             })
+            
+            if step % log_video_interval == 0:
+                log_gif(model, frames, params, key, ts, dt, solver, (0, 1), "video_gif")
 
         with open('params.p', 'wb') as f:
             pickle.dump(params, f)
         wandb.save('params.p')
 
     wandb.join(quiet=True)
+    
+def log_gif(model, frames, params, key, ts, dt, solver, range, name):
+    video, _ = model(params, key, ts, frames[0], dt, solver)
+    video = jnp.repeat(jnp.array(video), 3, axis=-1)
+    filename = f"tmp/{str(uuid.uuid4())}.gif"
+    with imageio.get_writer(filename, mode="I") as writer:
+        for b_frame in video:
+            frame = (b_frame * 255).astype(jnp.uint8)
+            writer.append_data(frame)
+
+    wandb.log({
+        name: wandb.Video(filename, fps=2, format="gif")
+    })
+    os.remove(filename)
 
 
 if __name__ == '__main__':

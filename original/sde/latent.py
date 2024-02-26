@@ -46,7 +46,7 @@ def build_data_and_model(
         hurst = None
 
     data_train, data_val, dataset_kwargs = data.get(dataset)
-    print(dataset_kwargs)
+#     print(dataset_kwargs)
     ts = jnp.arange(len(data_train[0])) * dataset_kwargs['dt']
     dt = dataset_kwargs['dt'] / int_sub_steps
 
@@ -97,7 +97,7 @@ def train(
         random_key, key = jax.random.split(random_key)
         latents = taesd.apply_encoder(params_, frames)
         recons = taesd.apply_decoder(params_,latents)
-        print(latents.shape)
+#         print(latents.shape)
         #print(latents.shape)
         #latent_imgo =latents[0]
         #latent_img = (latent_img - latent_img.min()) / (latent_img.max() - latent_img.min())
@@ -112,8 +112,8 @@ def train(
         #latent_img.save(f"latents/latent_{i}_{3}.png")
 
         #latent_vectors.append(latents)
-        print(recons[0].max())
-        print(recons.shape)
+#         print(recons[0].max())
+#         print(recons.shape)
         recons = recons.mean(axis=-1)
         recons = recons.clip(0,1)
         recon = Image.fromarray(np.array(recons[0] * 255,dtype=np.uint8))
