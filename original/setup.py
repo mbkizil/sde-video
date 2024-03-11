@@ -4,7 +4,7 @@ setup(
     name="video-sde",
     version="0.0.2",
     install_requires=[
-        'jax==0.4.19',
+        'jax==0.4.23',
         'scipy==1.11.3',
         'numpy==1.26.1',
         'notebook==6.5.6',

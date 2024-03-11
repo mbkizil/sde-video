@@ -143,7 +143,7 @@ class Decoder(nn.Module):
         x = nn.sigmoid(x)
         return x
 
-
+'''
 class Content(nn.Module):
     num_features: int
     num_contents: int
@@ -156,7 +156,22 @@ class Content(nn.Module):
         w = nn.silu(w)
         w = nn.Dense(self.num_contents)(w)
         return w
+'''
 
+# Spatial content block. (25, 8, 8, 4) -> (8, 8, 1)
+class Content(nn.Module):
+    num_features: int
+    num_contents: int
+    num_content_frames: int
+
+    @nn.compact
+    def __call__(self, h):
+        w = jnp.median(h[:self.num_content_frames], axis=0)
+        w = nn.Conv(self.num_features, kernel_size=(3, 3), padding='SAME')(w)
+        w = nn.silu(w)
+        w = nn.Conv(1, kernel_size=(3, 3), padding='SAME')(w)
+        print("\nContent W shape:", w.shape,"\n")
+        return w 
 
 class Infer(nn.Module):
     num_features: int
@@ -324,6 +339,7 @@ class FractionalSDE:
             xs, log_path = solve_diffrax(params, self, omega, x0, y0, ts, dt, keys[3], solver, args)
         return xs, log_path
 
+'''
 class Combine(nn.Module):
     content_dim: int
     latent_dim: int
@@ -347,6 +363,35 @@ class Combine(nn.Module):
         combined = nn.silu(combined)
         combined = nn.Conv(4, kernel_size=(3, 3), padding='SAME')(combined)
         return combined
+    '''
+
+class Combine(nn.Module):
+    content_dim: int
+    latent_dim: int
+    num_features: int
+
+    @nn.compact
+    def __call__(self, content, time):
+        #print("\ncontent shape: ",content.shape,"\n")
+        #print("\ntime shape: ",time.shape,"\n")
+        print("\nContent shape before res: ",content.shape,"\n")
+        content = jnp.reshape(content, (1, 8, 8, 1))
+        content = jnp.repeat(content,repeats=25,axis=0)
+        time_transform = nn.Dense(self.num_features)(time)
+        time_transform = nn.silu(time_transform)
+        time_transform = jnp.reshape(time_transform, time_transform.shape[:-1] + (8, 8, 1))
+        print("\nTime transform shape after res: ",time_transform.shape,"\n")
+        combined = jnp.concatenate([content, time_transform], axis=-1)
+        print("\nCombined shape after concat: ",combined.shape,"\n")
+        combined = nn.Dense(self.num_features)(combined)
+        combined = nn.silu(combined)
+        #print("\ncombined1 shape: ",combined.shape,"\n")
+        #print("\ncombined2 shape: ",combined.shape,"\n")
+        #combined = nn.Conv(4, kernel_size=(3, 3), padding='SAME')(combined)
+        #combined = nn.silu(combined)
+        combined = nn.Conv(4, kernel_size=(3, 3), padding='SAME')(combined)
+        return combined
+    
 class VideoSDE:
     """
     Latent Video Model.
@@ -391,11 +436,11 @@ class VideoSDE:
             params['x0_prior'] = self._x0_prior
 
         dummy_num_timesteps = 5
-        params['content'] = self._content.init(keys[1], jnp.zeros((dummy_num_timesteps, self.num_features)))
+        params['content'] = self._content.init(keys[1], jnp.zeros((dummy_num_timesteps, 8, 8, 4)))
         params['infer'] = self._infer.init(keys[2], jnp.zeros((dummy_num_timesteps, self.num_features)))
         params['sde'] = self._sde.init(keys[3])
         if TAE:
-            params['combine'] = self._combine.init(keys[4], jnp.zeros(self.num_contents), jnp.zeros((25,self.num_latents)))
+            params['combine'] = self._combine.init(keys[4], jnp.zeros((8,8,1)), jnp.zeros((25,self.num_latents)))
             with open('sde/taesd_flax_params.p', 'rb') as f:
                 params_ = pickle.load(f)
             params['taesd'] = params_
@@ -442,19 +487,20 @@ class VideoSDE:
 
             x0_prior = self.x0_prior(params)
             h = self.encoder(params, frames)
+            w = self.content(params, h)
+
             encoder_output_averaged = jnp.mean(h, axis=-1) 
             h= encoder_output_averaged.reshape(25, -1) 
-            w = self.content(params, h)
             x0_posterior, h = self.infer(params, h)
             context = {'ts': ts, 'hs': h}
             x0 = x0_posterior.sample(seed=keys[0])
             kl_x0 = x0_posterior.kl_divergence(x0_prior)
 
             xs, logpath = self.sde(params, keys[1], x0, ts, dt, solver, {'context': context})
-#             print("\nXS SHAPE: ", xs.shape, "\n")
-#             print("\nCONTENT SHAPE: ", w.shape, "\n")
+            print("\nXS SHAPE: ", xs.shape, "\n")
+            print("\nCONTENT SHAPE: ", w.shape, "\n")
             combined = self.combine(params, w, xs)
-#             print("\nCOMBINED SHAPE: ", combined.shape, "\n")
+            print("\nCOMBINED SHAPE: ", combined.shape, "\n")
             frames_ = self.decoder(params, combined)
             return frames_, (kl_x0, logpath)
         else:

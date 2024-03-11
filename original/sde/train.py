@@ -163,20 +163,10 @@ def train(
         pbar = tqdm(range(len(dataloader)))
         for step, frames in zip(pbar, dataloader):
             random_key, key = jax.random.split(random_key)
-            prm = params['taesd']
             (loss, loss_aux), grads = loss_grad(params, key, frames)
             nll, kl_x0, logpath = loss_aux
             updates, opt_state = optimizer.update(grads, opt_state)
-            if pri:
-                print("\n GRADS \n")
-                print(grads)
-                print("\n UPDATES \n")
-                print(updates)
-                if seco:
-                    pri = False
-                seco = True
             params = optax.apply_updates(params, updates)
-            params['taesd'] = prm
             pbar.set_description(f'[Epoch {epoch+1}/{num_epochs}] Loss: {float(loss):.2f}, Hurst: {model._sde.hurst(params["sde"]):.2f}, NLL: {nll:.2f}, KL_x0: {kl_x0:.2f}, KL_path: {logpath:.2f}')
 
             if onp.isnan(float(loss)):
