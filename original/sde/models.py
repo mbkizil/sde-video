@@ -167,10 +167,12 @@ class Content(nn.Module):
     @nn.compact
     def __call__(self, h):
         w = jnp.median(h[:self.num_content_frames], axis=0)
-        w = nn.Conv(self.num_features, kernel_size=(3, 3), padding='SAME')(w)
+        w = nn.Conv(4, kernel_size=(3, 3), padding='SAME')(w)
+        w = nn.silu(w)
+        w = nn.Conv(4, kernel_size=(3, 3), padding='SAME')(w)
         w = nn.silu(w)
         w = nn.Conv(1, kernel_size=(3, 3), padding='SAME')(w)
-        print("\nContent W shape:", w.shape,"\n")
+        #print("\nContent W shape:", w.shape,"\n")
         return w 
 
 class Infer(nn.Module):
@@ -377,6 +379,7 @@ class Combine(nn.Module):
         print("\nContent shape before res: ",content.shape,"\n")
         content = jnp.reshape(content, (1, 8, 8, 1))
         content = jnp.repeat(content,repeats=25,axis=0)
+        
         time_transform = nn.Dense(self.num_features)(time)
         time_transform = nn.silu(time_transform)
         time_transform = jnp.reshape(time_transform, time_transform.shape[:-1] + (8, 8, 1))
@@ -387,9 +390,8 @@ class Combine(nn.Module):
         combined = nn.silu(combined)
         #print("\ncombined1 shape: ",combined.shape,"\n")
         #print("\ncombined2 shape: ",combined.shape,"\n")
-        #combined = nn.Conv(4, kernel_size=(3, 3), padding='SAME')(combined)
-        #combined = nn.silu(combined)
         combined = nn.Conv(4, kernel_size=(3, 3), padding='SAME')(combined)
+        #combined = nn.sigmoid(combined)
         return combined
     
 class VideoSDE:
@@ -441,7 +443,7 @@ class VideoSDE:
         params['sde'] = self._sde.init(keys[3])
         if TAE:
             params['combine'] = self._combine.init(keys[4], jnp.zeros((8,8,1)), jnp.zeros((25,self.num_latents)))
-            with open('sde/taesd_flax_params.p', 'rb') as f:
+            with open('/kuacc/users/mkizil19/hpc_run/sde-video/sde-video/original/sde/taesd_flax_params.p', 'rb') as f:
                 params_ = pickle.load(f)
             params['taesd'] = params_
         else:
@@ -462,8 +464,8 @@ class VideoSDE:
             return self._encoder.apply(params['encoder'], *args)
 
     def decoder(self, params, *args):
-        if TAE:
-            return self._taesd.apply_decoder(params['taesd'], *args)
+        if TAE:    #### MODIFY ACCORINDG TO DATASETS CHANNEL
+            return jnp.reshape(jnp.mean(self._taesd.apply_decoder(params['taesd'], *args),axis=-1),(25,64,64,1))
         else:
             return self._decoder.apply(params['decoder'], *args)
     
@@ -497,10 +499,10 @@ class VideoSDE:
             kl_x0 = x0_posterior.kl_divergence(x0_prior)
 
             xs, logpath = self.sde(params, keys[1], x0, ts, dt, solver, {'context': context})
-            print("\nXS SHAPE: ", xs.shape, "\n")
-            print("\nCONTENT SHAPE: ", w.shape, "\n")
+            #print("\nXS SHAPE: ", xs.shape, "\n")
+            #print("\nCONTENT SHAPE: ", w.shape, "\n")
             combined = self.combine(params, w, xs)
-            print("\nCOMBINED SHAPE: ", combined.shape, "\n")
+            #print("\nCOMBINED SHAPE: ", combined.shape, "\n")
             frames_ = self.decoder(params, combined)
             return frames_, (kl_x0, logpath)
         else:

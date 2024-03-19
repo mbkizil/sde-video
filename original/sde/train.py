@@ -180,8 +180,8 @@ def train(
                 'hurst': float(model._sde.hurst(params["sde"])),
             })
             
-            if step % log_video_interval == 0:
-                log_gif(model, frames, params, key, ts, dt, solver, (0, 1), "video_gif")
+            #if step % log_video_interval == 0:
+             #   log_gif(model, frames, params, key, ts, dt, solver, (0, 1), "video_gif")
 
         with open('params.p', 'wb') as f:
             pickle.dump(params, f)
