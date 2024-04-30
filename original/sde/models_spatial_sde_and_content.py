@@ -181,12 +181,17 @@ class Infer(nn.Module):
 
     @nn.compact
     def __call__(self, x):
-        num_frames, num_features = x.shape
-        h = nn.Conv(self.num_features, kernel_size=(3,), padding='SAME')(x)
+        num_frames, height, width = x.shape
+        h = nn.Conv(self.num_features, kernel_size=(3,3), padding='SAME')(x)
         h = nn.silu(h)
-        h = nn.Conv(self.num_features, kernel_size=(3,), padding='SAME')(h)
-
-        g = nn.Dense(self.num_features)(jnp.concatenate([h[0], x[0], x[1], x[2]], axis=-1))
+        h = nn.Conv(self.num_features, kernel_size=(3,3), padding='SAME')(h)
+        h = nn.silu(h)
+        h = nn.Conv(self.num_features, kernel_size=(3,3), padding='SAME')(h)
+        h = nn.silu(h)
+        h = nn.Conv(self.num_features, kernel_size=(3,3), padding='SAME')(h)
+        g = jnp.concatenate([h[0], x[0], x[1], x[2]], axis=-1)
+        g = g.reshape(-1)
+        g = nn.Dense(self.num_features)(g) # Changed first two dense layers from self.num_features ** 2 to self.num_features
         g = nn.silu(g)
         g = nn.Dense(self.num_features)(g)
         g = nn.silu(g)
@@ -259,6 +264,7 @@ class FractionalSDE:
         self._b = b
         self._u = u
         self._s = s
+        self.latent_shape = (1, 6, 6)
 
         if type == 1:
             self.omega_fn = jax.jit(lambda hurst: omega_optimized_1(self.gamma, hurst, time_horizon))
@@ -273,7 +279,7 @@ class FractionalSDE:
             print('Falling back to standard Brownian Motion (gamma = [0], omega = [1]). Args gamma and type are ignored.')
             self._hurst = .5
             self.type = 2   # prevent problems with gamma = 0
-            self.gamma = jnp.array([0.])
+            self.gamma = jnp.zeros(self.latent_shape[1:])
             self._omega = jnp.array([1.])
         else:
             self._hurst = hurst
@@ -291,7 +297,7 @@ class FractionalSDE:
         params = {}
 
         if self._hurst is None:
-            params['hurst_raw'] = 0.    # sigmoid(0.) = .5
+            params['hurst_raw'] = 0. #jnp.zeros(self.latent_shape[1:])    # sigmoid(0.) = .5
 
         params['b'] = self._b.init(keys[0])
         params['u'] = self._u.init(keys[1])
@@ -312,12 +318,15 @@ class FractionalSDE:
 
     def b(self, params, t, x, args):      # Prior drift.
         return self._b(params['b'], t, x, args)
+        # return self._b(t, x, args)
 
     def u(self, params, t, x, y, args):   # Approximate posterior control.
         return self._u(params['u'], t, x, y, args)
+        # return self._u(t, x, args)
 
     def s(self, params, t, x, args):      # Shared diffusion.
         return self._s(params['s'], t, x, args)
+        # return self._s(t, x, args)
 
     def __call__(self, params, key, x0, ts, dt, solver='euler', args=None):
         keys = jax.random.split(key, 4)
@@ -327,9 +336,9 @@ class FractionalSDE:
 
         if self.type == 1:
             cov = 1 / (self.gamma[None, :] + self.gamma[:, None])
-            y0 = jax.random.multivariate_normal(keys[2], jnp.zeros((self.num_latents, self.num_k)), cov)
+            y0 = jax.random.multivariate_normal(keys[2], jnp.zeros((self.num_latents, self.num_latents, self.num_k)), cov)
         elif self.type == 2:
-            y0 = jnp.zeros((self.num_latents, self.num_k))
+            y0 = jnp.zeros((self.num_latents, self.num_latents, self.num_k))
 
         if solver == 'euler':
             num_steps = int(jnp.ceil((ts[-1] - ts[0]) / dt))
@@ -338,7 +347,7 @@ class FractionalSDE:
             # interpolate for requested timesteps
             xs = jax.vmap(jnp.interp, in_axes=(None, None, 1), out_axes=1)(ts, ts_, xs_)
         else:
-            xs, log_path = solve_diffrax(params, self, omega, x0, y0, ts, dt, keys[3], solver, args)
+            xs, log_path = solve_diffrax_spatial(params, self, omega, x0, y0, ts, dt, keys[3], solver, args)
         return xs, log_path
 
 '''
@@ -374,13 +383,16 @@ class Combine(nn.Module):
 
     @nn.compact
     def __call__(self, content, time):
-        #print("\ncontent shape: ",content.shape,"\n")
-        #print("\ntime shape: ",time.shape,"\n")
+        # print("content shape: ",content.shape)
+        # print("time shape: ",time.shape)
         # print("\nContent shape before res: ",content.shape,"\n")
         content = jnp.reshape(content, (1, 8, 8, 1))
         content = jnp.repeat(content,repeats=25,axis=0)
         
+        time = jnp.reshape(time, (25, 36))
         time_transform = nn.Dense(self.num_features)(time)
+        # print(f"Transformed time: {time_transform.shape}")
+        # print(f"Transformed content: {content.shape}")
         time_transform = nn.silu(time_transform)
         time_transform = jnp.reshape(time_transform, time_transform.shape[:-1] + (8, 8, 1))
         # print("\nTime transform shape after res: ",time_transform.shape,"\n")
@@ -439,10 +451,10 @@ class VideoSDE:
 
         dummy_num_timesteps = 5
         params['content'] = self._content.init(keys[1], jnp.zeros((dummy_num_timesteps, 8, 8, 4)))
-        params['infer'] = self._infer.init(keys[2], jnp.zeros((dummy_num_timesteps, self.num_features)))
+        params['infer'] = self._infer.init(keys[2], jnp.zeros((dummy_num_timesteps, 8, 8)))
         params['sde'] = self._sde.init(keys[3])
         if TAE:
-            params['combine'] = self._combine.init(keys[4], jnp.zeros((8,8,1)), jnp.zeros((25,self.num_latents)))
+            params['combine'] = self._combine.init(keys[4], jnp.zeros((8,8,1)), jnp.zeros((25,self.num_latents, self.num_latents)))
             # with open('/kuacc/users/mkizil19/hpc_run/sde-video/sde-video/original/sde/taesd_flax_params.p', 'rb') as f:
             #     params_ = pickle.load(f)
             with open('sde/taesd_flax_params.p', 'rb') as f:
@@ -492,13 +504,15 @@ class VideoSDE:
             x0_prior = self.x0_prior(params)
             h = self.encoder(params, frames)
             w = self.content(params, h)
-
-            encoder_output_averaged = jnp.mean(h, axis=-1) 
-            h= encoder_output_averaged.reshape(25, -1) 
+            # print(f"h shape: {h.shape}")
+            h = jnp.mean(h, axis=-1) 
+            # h= encoder_output_averaged.reshape(25, -1) 
             x0_posterior, h = self.infer(params, h)
             context = {'ts': ts, 'hs': h}
-            x0 = x0_posterior.sample(seed=keys[0])
+            x0 = x0_posterior.sample(seed=keys[0], sample_shape=self._sde.latent_shape)#[:, :, :, 0]
             kl_x0 = x0_posterior.kl_divergence(x0_prior)
+
+            x0 = x0[:, :, :, 0]
 
             xs, logpath = self.sde(params, keys[1], x0, ts, dt, solver, {'context': context})
             #print("\nXS SHAPE: ", xs.shape, "\n")

@@ -6,6 +6,7 @@ import flax.linen as nn
 import distrax
 from taesd import TAESD
 import pickle
+import equinox as eqx
 
 TAE = True
 
@@ -143,27 +144,24 @@ class Decoder(nn.Module):
         x = nn.sigmoid(x)
         return x
 
-'''
+
 class Content(nn.Module):
     num_features: int
     num_contents: int
     num_content_frames: int
 
-    @nn.compact
-    def __call__(self, h):
-        w = jnp.median(h[:self.num_content_frames], axis=-2)
-        w = nn.Dense(self.num_features)(w)
-        w = nn.silu(w)
-        w = nn.Dense(self.num_contents)(w)
-        return w
-'''
-
-# Spatial content block. (25, 8, 8, 4) -> (8, 8, 1)
-class Content(nn.Module):
-    num_features: int
-    num_contents: int
-    num_content_frames: int
-
+    # @nn.compact
+    # def __call__(self, h):
+    #     # w = jnp.median(h[:self.num_content_frames], axis=-2)
+    #     w = h[:self.num_content_frames]
+    #     w = jnp.mean(w, axis=0)
+    #     # w = jnp.transpose(w, (1, 2, 0))
+    #     w = jnp.reshape(w, (-1, self.num_features ** 2))
+    #     w = nn.Dense(self.num_features ** 2)(w)
+    #     w = nn.silu(w)
+    #     w = nn.Dense(self.num_contents ** 2)(w)
+    #     w = jnp.reshape(w, (1, self.num_contents, self.num_contents, 1))
+    #     return w
     @nn.compact
     def __call__(self, h):
         w = jnp.median(h[:self.num_content_frames], axis=0)
@@ -172,8 +170,9 @@ class Content(nn.Module):
         w = nn.Conv(4, kernel_size=(3, 3), padding='SAME')(w)
         w = nn.silu(w)
         w = nn.Conv(1, kernel_size=(3, 3), padding='SAME')(w)
-        #print("\nContent W shape:", w.shape,"\n")
+        # print("\nContent W shape:", w.shape,"\n")
         return w 
+
 
 class Infer(nn.Module):
     num_features: int
@@ -181,14 +180,15 @@ class Infer(nn.Module):
 
     @nn.compact
     def __call__(self, x):
-        num_frames, num_features = x.shape
-        h = nn.Conv(self.num_features, kernel_size=(3,), padding='SAME')(x)
+        num_frames, height, width = x.shape
+        h = nn.Conv(self.num_features, kernel_size=(3,3), padding='SAME')(x)
         h = nn.silu(h)
-        h = nn.Conv(self.num_features, kernel_size=(3,), padding='SAME')(h)
-
-        g = nn.Dense(self.num_features)(jnp.concatenate([h[0], x[0], x[1], x[2]], axis=-1))
+        h = nn.Conv(self.num_features, kernel_size=(3,3), padding='SAME')(h)
+        g = jnp.concatenate([h[0], x[0], x[1], x[2]], axis=-1)
+        g = g.reshape(-1)
+        g = nn.Dense(self.num_features**2)(g)
         g = nn.silu(g)
-        g = nn.Dense(self.num_features)(g)
+        g = nn.Dense(self.num_features**2)(g)
         g = nn.silu(g)
         g = nn.Dense(2 * self.num_latents)(g)
 
@@ -259,6 +259,7 @@ class FractionalSDE:
         self._b = b
         self._u = u
         self._s = s
+        self.latent_shape = (1, 6, 6)
 
         if type == 1:
             self.omega_fn = jax.jit(lambda hurst: omega_optimized_1(self.gamma, hurst, time_horizon))
@@ -273,7 +274,8 @@ class FractionalSDE:
             print('Falling back to standard Brownian Motion (gamma = [0], omega = [1]). Args gamma and type are ignored.')
             self._hurst = .5
             self.type = 2   # prevent problems with gamma = 0
-            self.gamma = jnp.array([0.])
+            # self.gamma = jnp.array([0.])
+            self.gamma = jnp.zeros(self.latent_shape[1:])
             self._omega = jnp.array([1.])
         else:
             self._hurst = hurst
@@ -293,9 +295,9 @@ class FractionalSDE:
         if self._hurst is None:
             params['hurst_raw'] = 0.    # sigmoid(0.) = .5
 
-        params['b'] = self._b.init(keys[0])
-        params['u'] = self._u.init(keys[1])
-        params['s'] = self._s.init(keys[2])
+        # params['b'] = self._b.init(keys[0])
+        # params['u'] = self._u.init(keys[1])
+        # params['s'] = self._s.init(keys[2])
         return params
 
     def hurst(self, params):
@@ -311,13 +313,16 @@ class FractionalSDE:
             return self._omega
 
     def b(self, params, t, x, args):      # Prior drift.
-        return self._b(params['b'], t, x, args)
+        # return self._b(params['b'], t, x, args)
+        return self._b(t, x, args)
 
     def u(self, params, t, x, y, args):   # Approximate posterior control.
-        return self._u(params['u'], t, x, y, args)
+        # return self._u(params['u'], t, x, y, args)
+        return self._u(t, x, args)
 
     def s(self, params, t, x, args):      # Shared diffusion.
-        return self._s(params['s'], t, x, args)
+        # return self._s(params['s'], t, x, args)
+        return self._s(t, x, args)
 
     def __call__(self, params, key, x0, ts, dt, solver='euler', args=None):
         keys = jax.random.split(key, 4)
@@ -327,9 +332,9 @@ class FractionalSDE:
 
         if self.type == 1:
             cov = 1 / (self.gamma[None, :] + self.gamma[:, None])
-            y0 = jax.random.multivariate_normal(keys[2], jnp.zeros((self.num_latents, self.num_k)), cov)
+            y0 = jax.random.multivariate_normal(keys[2], jnp.zeros((self.num_latents, self.num_latents, self.num_k)), cov)
         elif self.type == 2:
-            y0 = jnp.zeros((self.num_latents, self.num_k))
+            y0 = jnp.zeros((self.num_latents, self.num_latents, self.num_k))
 
         if solver == 'euler':
             num_steps = int(jnp.ceil((ts[-1] - ts[0]) / dt))
@@ -338,10 +343,9 @@ class FractionalSDE:
             # interpolate for requested timesteps
             xs = jax.vmap(jnp.interp, in_axes=(None, None, 1), out_axes=1)(ts, ts_, xs_)
         else:
-            xs, log_path = solve_diffrax(params, self, omega, x0, y0, ts, dt, keys[3], solver, args)
+            xs, log_path = solve_diffrax_spatial(params, self, omega, x0, y0, ts, dt, keys[3], solver, args)
         return xs, log_path
 
-'''
 class Combine(nn.Module):
     content_dim: int
     latent_dim: int
@@ -349,51 +353,29 @@ class Combine(nn.Module):
 
     @nn.compact
     def __call__(self, content, time):
-       #print("\ncontent shape: ",content.shape,"\n")
-        #print("\ntime shape: ",time.shape,"\n")
-        content_transform = nn.Dense(self.num_features)(content)
-        content_transform = nn.silu(content_transform)
-        time_transform = nn.Dense(self.num_features)(time)
+        # print(f"Start of Combine block")
+        # content = jnp.reshape(content, (-1, self.num_features ** 2))
+        time = jnp.reshape(time, (-1, 36))
+        # content_transform = nn.Dense(self.num_features ** 2)(content)
+        # content_transform = nn.silu(content_transform)
+        time_transform = nn.Dense(self.num_features ** 2)(time)
         time_transform = nn.silu(time_transform)
+        # content_transform = jnp.reshape(content_transform, (1, self.num_features, self.num_features, 1))
+        content_transform = content[None, :, :, :]
+        time_transform = jnp.reshape(time_transform, (-1, self.num_features, self.num_features, 1))
+        # print(f"Content shape: {content_transform.shape}")
+        # print(f"Time shape: {time_transform.shape}")
         combined = content_transform + time_transform
-        combined = nn.Dense(self.num_features)(combined)
-        combined = nn.silu(combined)
-        #print("\ncombined1 shape: ",combined.shape,"\n")
-        combined = jnp.reshape(combined, combined.shape[:-1] + (8, 8,1))
-        #print("\ncombined2 shape: ",combined.shape,"\n")
+        # print(f"Combined shape before convs: {combined.shape}")
         combined = nn.Conv(4, kernel_size=(3, 3), padding='SAME')(combined)
         combined = nn.silu(combined)
+        # print(f"Combined shape after first conv: {combined.shape}")
         combined = nn.Conv(4, kernel_size=(3, 3), padding='SAME')(combined)
+        combined = nn.silu(combined)
+        # print(f"Combined shape after second conv: {combined.shape}")
+        combined = nn.Conv(4, kernel_size=(3, 3), padding='SAME')(combined)
+        # print(f"Combined shape after third conv: {combined.shape}")
         return combined
-    '''
-
-class Combine(nn.Module):
-    content_dim: int
-    latent_dim: int
-    num_features: int
-
-    @nn.compact
-    def __call__(self, content, time):
-        #print("\ncontent shape: ",content.shape,"\n")
-        #print("\ntime shape: ",time.shape,"\n")
-        # print("\nContent shape before res: ",content.shape,"\n")
-        content = jnp.reshape(content, (1, 8, 8, 1))
-        content = jnp.repeat(content,repeats=25,axis=0)
-        
-        time_transform = nn.Dense(self.num_features)(time)
-        time_transform = nn.silu(time_transform)
-        time_transform = jnp.reshape(time_transform, time_transform.shape[:-1] + (8, 8, 1))
-        # print("\nTime transform shape after res: ",time_transform.shape,"\n")
-        combined = jnp.concatenate([content, time_transform], axis=-1)
-        # print("\nCombined shape after concat: ",combined.shape,"\n")
-        combined = nn.Dense(self.num_features)(combined)
-        combined = nn.silu(combined)
-        #print("\ncombined1 shape: ",combined.shape,"\n")
-        #print("\ncombined2 shape: ",combined.shape,"\n")
-        combined = nn.Conv(4, kernel_size=(3, 3), padding='SAME')(combined)
-        #combined = nn.sigmoid(combined)
-        return combined
-    
 class VideoSDE:
     """
     Latent Video Model.
@@ -428,7 +410,7 @@ class VideoSDE:
         self._sde = sde
         if TAE:
             self._taesd = TAESD()
-            self._combine = Combine(num_features, num_latents, num_features)
+            self._combine = Combine(num_contents, num_latents, num_features)
 
     def init(self, key):
         keys = jax.random.split(key, 5)
@@ -438,13 +420,12 @@ class VideoSDE:
             params['x0_prior'] = self._x0_prior
 
         dummy_num_timesteps = 5
-        params['content'] = self._content.init(keys[1], jnp.zeros((dummy_num_timesteps, 8, 8, 4)))
-        params['infer'] = self._infer.init(keys[2], jnp.zeros((dummy_num_timesteps, self.num_features)))
+        params['content'] = self._content.init(keys[1], jnp.zeros((dummy_num_timesteps, self.num_features, self.num_features, 4)))
+        params['infer'] = self._infer.init(keys[2], jnp.zeros((dummy_num_timesteps, self.num_features, self.num_features)))
         params['sde'] = self._sde.init(keys[3])
+        # params['sde'] = eqx.filter(self._sde, eqx.is_array)
         if TAE:
-            params['combine'] = self._combine.init(keys[4], jnp.zeros((8,8,1)), jnp.zeros((25,self.num_latents)))
-            # with open('/kuacc/users/mkizil19/hpc_run/sde-video/sde-video/original/sde/taesd_flax_params.p', 'rb') as f:
-            #     params_ = pickle.load(f)
+            params['combine'] = self._combine.init(keys[4], jnp.zeros((self.num_features, self.num_features, 1)), jnp.zeros((dummy_num_timesteps, 6, 6)))
             with open('sde/taesd_flax_params.p', 'rb') as f:
                 params_ = pickle.load(f)
             params['taesd'] = params_
@@ -483,28 +464,26 @@ class VideoSDE:
     def sde(self, params, *args):
         return self._sde(params['sde'], *args)
 
+        # return self._sde(*args)
+
     def __call__(self, params, key, ts, frames, dt, solver):
         if TAE:
             keys = jax.random.split(key, 2)
             frames = jnp.repeat(frames,repeats=3,axis=-1) 
-            num_frames, height, width, num_channels = frames.shape
-
             x0_prior = self.x0_prior(params)
             h = self.encoder(params, frames)
-            w = self.content(params, h)
-
             encoder_output_averaged = jnp.mean(h, axis=-1) 
-            h= encoder_output_averaged.reshape(25, -1) 
-            x0_posterior, h = self.infer(params, h)
-            context = {'ts': ts, 'hs': h}
-            x0 = x0_posterior.sample(seed=keys[0])
+            w = self.content(params, h)
+            h = encoder_output_averaged.reshape(25, -1) 
+            x0_posterior, h = self.infer(params, encoder_output_averaged) 
+            context = {'ts': ts, 'hs': encoder_output_averaged}
+            # x0 = x0_posterior.sample(seed=keys[0])
+            x0 = x0_posterior.sample(seed=keys[0], sample_shape=self._sde.latent_shape)[:, :, :, 0]
             kl_x0 = x0_posterior.kl_divergence(x0_prior)
 
             xs, logpath = self.sde(params, keys[1], x0, ts, dt, solver, {'context': context})
-            #print("\nXS SHAPE: ", xs.shape, "\n")
-            #print("\nCONTENT SHAPE: ", w.shape, "\n")
+            # xs, logpath = self.sde(keys[1], x0, ts, dt)
             combined = self.combine(params, w, xs)
-            #print("\nCOMBINED SHAPE: ", combined.shape, "\n")
             frames_ = self.decoder(params, combined)
             return frames_, (kl_x0, logpath)
         else:
@@ -517,6 +496,8 @@ class VideoSDE:
             x0 = x0_posterior.sample(seed=keys[0])
             kl_x0 = x0_posterior.kl_divergence(x0_prior)
 
-            xs, logpath = self.sde(params, keys[1], x0, ts, dt, solver, {'context': context})
+            # xs, logpath = self.sde(params, keys[1], x0, ts, dt, solver, {'context': context})
+            xs, logpath = self.sde(keys[1], x0, ts, dt)
             frames_ = self.decoder(params, jnp.concatenate([w[None, :].repeat(len(xs), axis=0), xs], axis=-1))
             return frames_, (kl_x0, logpath)
+

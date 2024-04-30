@@ -70,11 +70,15 @@ def omega_riemann(gamma, hurst):
 
 def omega_optimized_1(gamma, hurst, time_horizon, return_cost=False):
     # based on Variance of approximation error with type I fBM
+    # print("Start of omega_optimized_1 function")
+    # print(f"Gamma: {gamma}")
+    # print(f"Hurst: {hurst}")
     gamma_i, gamma_j = gamma[None, :], gamma[:, None]
 
     A = (2 * time_horizon + (jnp.exp(- gamma_i * time_horizon) - 1) / gamma_i + (jnp.exp(- gamma_j * time_horizon) - 1) / gamma_j) / (gamma_i + gamma_j)
     b = 2 * time_horizon / gamma ** (hurst + .5) - time_horizon ** (hurst + .5) / (gamma * sp.gamma(hurst + 1.5)) + (jnp.exp(- gamma * time_horizon) - gammaincc_ez(hurst + .5, gamma * time_horizon)) / gamma ** (hurst + 1.5)
     omega = jax.scipy.linalg.solve(A, b, assume_a='sym')
+    # print(f"Solved omega: {omega}")
     if return_cost:
         c = time_horizon ** (2 * hurst + 1) / (2 * hurst + 1)
         cost = (omega.T @ A @ omega - 2 * b.T @ omega + c) / time_horizon
@@ -169,6 +173,24 @@ class CustomPath(diffrax.AbstractPath):
         dW = self.brownian_path.evaluate(t0=t0, t1=t1, left=left)
         return (dW, dW, jnp.zeros(self.num_latents))
 
+class CustomPathSpatial(diffrax.AbstractPath):
+    num_latents: int
+    num_k: int
+    brownian_path: diffrax.VirtualBrownianTree
+
+    def __init__(self, t0, t1, tol, num_latents, num_k, key):
+        self.t0 = t0
+        self.t1 = t1
+        self.num_latents = num_latents
+        self.num_k = num_k
+        self.brownian_path = diffrax.VirtualBrownianTree(t0=t0, t1=t1, tol=tol, shape=(1, num_latents,num_latents), key=key)
+
+    def evaluate(self, t0, t1=None, left: bool = True):
+        dW = self.brownian_path.evaluate(t0=t0, t1=t1, left=left)
+        # print(f"dW shape: {dW.shape}")
+        # print((1, self.num_latents, self.num_latents))
+        return (dW, dW, jnp.zeros((1, self.num_latents, self.num_latents)))
+
 def solve_diffrax(params, model, omega, x0, y0, ts, dt, key, solver=diffrax.Euler(), args=None):
     def drift(t, state, args):
         x, y, _ = state
@@ -199,3 +221,49 @@ def solve_diffrax(params, model, omega, x0, y0, ts, dt, key, solver=diffrax.Eule
     )
     xs, ys, log_path_int = sol.ys
     return xs, log_path_int[-1]
+
+def solve_diffrax_spatial(params, model, omega, x0, y0, ts, dt, key, solver=diffrax.Euler(), args=None):
+    def drift(t, state, args):
+        x, y, _ = state
+        u = model.u(params, t, x, y, args)
+        
+        # This one works now
+        dy = - jnp.tile(model.gamma[:, None, None], [1, 6, 6]) * y + u#[None, :]
+        # This one still doesn't work
+        # print(f"dx term")
+        # print(model.b(params, t, x, args).shape)
+        # print(model.s(params, t, x, args).shape)
+        # print(omega[:, None].shape)
+        # print(dy.shape)
+        dx = model.b(params, t, x, args) + model.s(params, t, x, args) * (jnp.tile(omega[:, None, None], [1, 6, 6]) * dy).sum(axis=0)
+        # print(f"dx shape: {dx.shape}")
+        # print(f"dy shape: {dy.shape}")
+        # print(f"u shape: {u.shape}")
+        # return (jnp.tile(dx, [5, 1, 1]), dy, jnp.tile(.5 * u ** 2, [5, 1, 1]))
+        return (dx, jnp.mean(dy, axis=0), .5 * u ** 2)
+    def diffusion(t, state, args):
+        x, _, _ = state
+        return (model.s(params, t, x, args) * omega.sum(), jnp.ones((model.num_k, model.num_latents, model.num_latents)), jnp.zeros(model.latent_shape))
+
+    keys = jax.random.split(key, 2)
+    state_init = (x0, y0.T, jnp.zeros(model.latent_shape))
+    
+    # brownian_motion = diffrax.VirtualBrownianTree(ts[0], ts[-1], dt, (jax.ShapeDtypeStruct(model.latent_shape, x0.dtype), jax.ShapeDtypeStruct(model.latent_shape, x0.dtype)), keys[0])
+    # brownian_motion = diffrax.VirtualBrownianTree(ts[0], ts[-1], dt, jax.ShapeDtypeStruct(model.latent_shape, x0.dtype), keys[0])
+    brownian_motion = CustomPathSpatial(ts[0], ts[-1], dt / 10, model.num_latents, model.num_k, key)
+    terms = diffrax.MultiTerm(diffrax.ODETerm(drift), diffrax.WeaklyDiagonalControlTerm(diffusion, brownian_motion))
+    solution = diffrax.diffeqsolve(
+        terms,
+        diffrax.StratonovichMilstein(),
+        ts[0],
+        ts[-1],
+        dt0=dt,
+        y0=state_init,
+        saveat=diffrax.SaveAt(ts=ts),
+    )
+    # print(solution.ys[0].shape)
+    # print(solution.ys[1].shape)
+    # print(solution.ys[2].shape)
+    xs, kl_path_int = solution.ys[:2]
+    kl = kl_path_int[-1]  # the kl intergral was computed along with the solve, so the final value is what we need, see output of _drift above
+    return xs, kl
